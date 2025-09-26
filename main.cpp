@@ -39,6 +39,7 @@
 
 #ifdef _WIN32
   #include <windows.h>
+#include <direct.h>
 #endif
 
 // --------------------------- Forward declarations --------------------------
@@ -114,8 +115,38 @@ static int new_task_parent_idx = -1;
 
 static std::mt19937 rng((unsigned)std::time(nullptr));
 
-static const std::vector<std::string> kBreakTypes = {"Coffee", "Bathroom", "Water", "Lunch", "Stretch"};
+static const std::vector<std::string> kBreakTypes = {"Coffee", "Bathroom", "Water", "Lunch", "Stretch", "Discussion with colleague"};
 static int selectedBreakTypeIndex = 0;
+
+// Session start time - used by the big timer
+static time_t app_start_time = 0;
+
+// Tracking state: when not in a break, tracking_start_time is the timestamp when tracking last resumed.
+// When tracking is running, tracking_start_time != 0. accumulated_tracked_seconds holds seconds tracked while not paused.
+static time_t tracking_start_time = 0;
+static long accumulated_tracked_seconds = 0;
+
+// Helper to format an elapsed duration (seconds) as Dd HH:MM:SS or HH:MM:SS
+static std::string format_duration_seconds(time_t seconds) {
+    long s = (long)seconds;
+    int days = (int)(s / 86400);
+    s = s % 86400;
+    int hours = (int)(s / 3600);
+    s = s % 3600;
+    int mins = (int)(s / 60);
+    int secs = (int)(s % 60);
+    std::ostringstream oss;
+    if (days > 0) oss << days << "d ";
+    oss << std::setfill('0') << std::setw(2) << hours << ":" << std::setw(2) << mins << ":" << std::setw(2) << secs;
+    return oss.str();
+}
+
+// Helper: count currently active breaks (end == 0)
+static int active_breaks_count() {
+    int c = 0;
+    for (const auto &b : breaks) if (b.end == 0) ++c;
+    return c;
+}
 
 // ----------------------- File/time helpers --------------------------------
 static std::string user_data_dir() {
@@ -375,9 +406,21 @@ static void load_daily_logs() {
 
 // ---------------- Breaks/tasks helper definitions -------------------------
 static void start_break(const std::string &type) {
+    bool was_active = (active_breaks_count() > 0);
+
     BreakEntry b; b.type = type; b.start = time(nullptr); b.end = 0;
     breaks.push_back(b);
     append_daily_log("BREAK_START", std::string("Started break: ") + type);
+
+    // If this is the first active break, pause the session tracking
+    if (!was_active) {
+        if (tracking_start_time != 0) {
+            time_t now = time(nullptr);
+            accumulated_tracked_seconds += (long)(now - tracking_start_time);
+            tracking_start_time = 0;
+            append_daily_log("TIMER", std::string("Paused session timer (break started)"));
+        }
+    }
 }
 static void end_last_break_of_type(const std::string &type) {
     for (auto it = breaks.rbegin(); it != breaks.rend(); ++it) {
@@ -387,6 +430,12 @@ static void end_last_break_of_type(const std::string &type) {
             oss << "Ended break: " << it->type << " (start " << format_time_local(it->start)
                 << ", end " << format_time_local(it->end) << ")";
             append_daily_log("BREAK_END", oss.str());
+
+            // If there are no more active breaks after ending this one, resume the session tracking
+            if (active_breaks_count() == 0) {
+                tracking_start_time = time(nullptr);
+                append_daily_log("TIMER", std::string("Resumed session timer (break ended)"));
+            }
             return;
         }
     }
@@ -414,6 +463,11 @@ static void clearAllData()
     dailyLogs.clear();
     breaks.clear();
     tasks.clear();
+
+    // Reset timers
+    app_start_time = time(nullptr);
+    tracking_start_time = app_start_time;
+    accumulated_tracked_seconds = 0;
 }
 
 // ----------------------- ImGui theme & helpers ----------------------------
@@ -645,6 +699,11 @@ int main(int, char**) {
 
     load_tasks();
     load_daily_logs();
+
+    // record session start
+    app_start_time = time(nullptr);
+    tracking_start_time = app_start_time;
+    accumulated_tracked_seconds = 0;
 
     double lastTime = glfwGetTime();
     int lastHour = -1;
@@ -931,6 +990,54 @@ int main(int, char**) {
         ImGui::SameLine();
 
         ImGui::BeginChild("right_panel", ImVec2(rightWidth, 0), true);
+            // Big session timer displayed prominently at the top of the right panel
+            {
+                time_t nowt = time(nullptr);
+                // Compute total tracked seconds (exclude time spent during active breaks)
+                long total_tracked = accumulated_tracked_seconds + ((tracking_start_time==0) ? 0L : (long)(nowt - tracking_start_time));
+                std::string dur = format_duration_seconds(total_tracked);
+                bool running = (tracking_start_time != 0);
+                std::string visible = std::string("Session: ") + dur + (running ? std::string("") : std::string(" (BREAK)"));
+                std::string btnLabel = makeButtonLabel(visible, "session_timer_btn");
+
+                // Running: dark green background, Paused: red background
+                ImVec4 b_run  = ImVec4(0.04f, 0.40f, 0.12f, 1.0f); // dark green
+                ImVec4 bh_run = ImVec4(0.08f, 0.55f, 0.20f, 1.0f);
+                ImVec4 ba_run = ImVec4(0.03f, 0.33f, 0.10f, 1.0f);
+
+                ImVec4 b_paused  = ImVec4(0.85f, 0.12f, 0.12f, 1.0f); // red when paused
+                ImVec4 bh_paused = ImVec4(0.95f, 0.25f, 0.25f, 1.0f);
+                ImVec4 ba_paused = ImVec4(0.75f, 0.10f, 0.10f, 1.0f);
+
+                if (running) {
+                    ImGui::PushStyleColor(ImGuiCol_Button, b_run);
+                    ImGui::PushStyleColor(ImGuiCol_ButtonHovered, bh_run);
+                    ImGui::PushStyleColor(ImGuiCol_ButtonActive, ba_run);
+                } else {
+                    ImGui::PushStyleColor(ImGuiCol_Button, b_paused);
+                    ImGui::PushStyleColor(ImGuiCol_ButtonHovered, bh_paused);
+                    ImGui::PushStyleColor(ImGuiCol_ButtonActive, ba_paused);
+                }
+
+                // Use black text for the timer label
+                ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(0.02f, 0.02f, 0.02f, 1.0f));
+
+                // Temporarily increase font scale to make the text very large (timebomb look)
+                ImGuiIO &gio = ImGui::GetIO();
+                float oldScale = gio.FontGlobalScale;
+                gio.FontGlobalScale = oldScale * 2.0f;
+
+                // Use full available width and a taller height to make it visually prominent
+                float availW = ImGui::GetContentRegionAvail().x;
+                ImGui::Button(btnLabel.c_str(), ImVec2(availW, 100.0f));
+
+                // Restore font scale and pop the text color and button colors
+                gio.FontGlobalScale = oldScale;
+                ImGui::PopStyleColor(1); // pop text color
+                ImGui::PopStyleColor(3); // pop button colors
+                ImGui::Spacing();
+            }
+
             ImGui::Text("Break Controls:");
             ImGui::Separator();
             ImGui::SetNextItemWidth(180);
@@ -973,7 +1080,7 @@ int main(int, char**) {
             ImGui::InputText("Quick log###input_quick_log_right", hourlyInputText, sizeof(hourlyInputText));
             ImGui::SameLine();
             if (ImGui::Button("Log Now###btn_log_now_right")) {
-                if (std::strlen(hourlyInputText)>0) { append_daily_log("HOURLY", std::string(hourlyInputText)); std::memset(hourlyInputText,0,sizeof(hourlyInputText)); }
+                if (std::strlen(hourlyInputText)>0) { append_daily_log("HOURLY", std::string(hourlyInputText)); std::memset(hourlyInputText, 0, sizeof(hourlyInputText)); }
             }
 
             ImGui::Separator();
