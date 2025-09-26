@@ -54,6 +54,7 @@ static std::string export_weekly_logs_file();
 static void save_daily_status_to_disk_and_log(const std::string &text);
 static void save_weekly_status_to_disk_and_log(const std::string &text);
 static void save_tasks();
+static void end_day_action();
 
 // ----------------------- Cross-platform alert (best-effort) ----------------
 static void play_alert_sound() {
@@ -470,6 +471,60 @@ static void clearAllData()
     accumulated_tracked_seconds = 0;
 }
 
+static std::atomic<bool> request_quit(false);
+
+static void end_day_action() {
+    time_t now = time(nullptr);
+    // End any active breaks
+    for (auto &b : breaks) {
+        if (b.end == 0) {
+            b.end = now;
+            std::ostringstream oss; oss << "Ended break: " << b.type << " (start " << format_time_local(b.start) << ", end " << format_time_local(b.end) << ")";
+            append_daily_log("BREAK_END", oss.str());
+        }
+    }
+
+    // Pause tracking if running and accumulate
+    if (tracking_start_time != 0) {
+        accumulated_tracked_seconds += (long)(now - tracking_start_time);
+        tracking_start_time = 0;
+        append_daily_log("TIMER", std::string("Paused session timer (end of day)"));
+    }
+
+    long total_tracked = accumulated_tracked_seconds;
+    std::string total_s = format_duration_seconds(total_tracked);
+    append_daily_log("END_DAY", std::string("End of day. Total tracked: ") + total_s);
+
+    // Export hourly logs (today)
+    std::string p1 = export_hourly_logs_today();
+    if (!p1.empty()) append_daily_log("EXPORT", std::string("Exported hourly logs (today) to ") + p1);
+
+    // Export weekly logs
+    std::string p2 = export_weekly_logs_file();
+    if (!p2.empty()) append_daily_log("EXPORT", std::string("Exported weekly logs to ") + p2);
+
+    // Save inline daily/weekly status if present
+    if (std::strlen(dailyStatusText) > 0) {
+        std::string pd = export_text_to_file("daily_status_end_of_day", dailyStatusText);
+        if (!pd.empty()) append_daily_log("EXPORT", std::string("Exported daily status to ") + pd);
+    }
+    if (std::strlen(weeklyStatusText) > 0) {
+        std::string pw = export_text_to_file("weekly_status_end_of_day", weeklyStatusText);
+        if (!pw.empty()) append_daily_log("EXPORT", std::string("Exported weekly status to ") + pw);
+    }
+
+    // Save tasks
+    save_tasks();
+
+    // Reset timers for next day/session
+    app_start_time = time(nullptr);
+    tracking_start_time = app_start_time;
+    accumulated_tracked_seconds = 0;
+
+    // Request app quit after finishing end-of-day work
+    request_quit.store(true);
+}
+
 // ----------------------- ImGui theme & helpers ----------------------------
 static void ApplyGrayTheme() {
     ImGuiStyle &style = ImGui::GetStyle();
@@ -780,6 +835,34 @@ int main(int, char**) {
             ImGui::PushStyleColor(ImGuiCol_ButtonActive, btnA);
             if (ImGui::Button(makeButtonLabel("Test Hourly Popup", "btn_test_hourly_popup").c_str())) requestHourlyPopup = true;
             ImGui::PopStyleColor(3);
+        }
+        ImGui::SameLine();
+
+        // End Day (orange)
+        {
+            ImVec4 b = ImVec4(0.9f,0.45f,0.12f,1.0f);
+            ImVec4 bh = ImVec4(0.95f,0.60f,0.20f,1.0f);
+            ImVec4 ba = ImVec4(0.85f,0.40f,0.10f,1.0f);
+            ImGui::PushStyleColor(ImGuiCol_Button, b);
+            ImGui::PushStyleColor(ImGuiCol_ButtonHovered, bh);
+            ImGui::PushStyleColor(ImGuiCol_ButtonActive, ba);
+            if (ImGui::Button(makeButtonLabel("End Day", "btn_end_day").c_str())) ImGui::OpenPopup("Confirm End Day");
+            ImGui::PopStyleColor(3);
+
+            if (ImGui::BeginPopupModal("Confirm End Day", NULL, ImGuiWindowFlags_AlwaysAutoResize)) {
+                if (ImGui::IsWindowAppearing()) ImGui::SetKeyboardFocusHere();
+                ImGui::TextWrapped("This will end any active breaks, pause the session timer, export logs/status and reset tracking for the next day. Proceed?");
+                ImGui::Separator();
+                if (ImGui::Button("Yes - End Day")) {
+                    end_day_action();
+                    ImGui::CloseCurrentPopup();
+                }
+                ImGui::SameLine();
+                if (ImGui::Button("Cancel")) {
+                    ImGui::CloseCurrentPopup();
+                }
+                ImGui::EndPopup();
+            }
         }
         ImGui::SameLine();
 
@@ -1118,6 +1201,11 @@ int main(int, char**) {
         ImGui::EndChild();
 
         ImGui::End(); // MainWindow
+
+        // If end_day_action requested quitting, close the window to exit gracefully
+        if (request_quit.load()) {
+            glfwSetWindowShouldClose(window, GLFW_TRUE);
+        }
 
         // Hourly popup
         if (ImGui::BeginPopupModal("Hourly Log", NULL, ImGuiWindowFlags_AlwaysAutoResize)) {
