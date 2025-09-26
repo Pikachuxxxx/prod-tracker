@@ -501,29 +501,72 @@ static std::string makeButtonLabel(const std::string &visible, const std::string
     return visible + "###" + uniqueId;
 }
 
+static void removeTaskAndChildren(int idx)
+{
+    // Safety
+    if (idx < 0 || idx >= (int)tasks.size()) return;
+
+    // First remove children (iterate backwards so erasures don't invalidate earlier indices)
+    for (int i = (int)tasks.size() - 1; i >= 0; --i) {
+        if (tasks[i].parent == idx) {
+            removeTaskAndChildren(i);
+        }
+    }
+
+    // Log removal (optional)
+    append_daily_log("TASK_REMOVE", std::string("Removed task: ") + tasks[idx].name);
+
+    // Erase the task
+    tasks.erase(tasks.begin() + idx);
+
+    // After erasing an element, indices > idx shift down by 1.
+    // Update parent references so they still point to the correct tasks.
+    for (auto &t : tasks) {
+        if (t.parent > idx) --t.parent;
+        // If some code uses -2 or special parent markers, handle here — this assumes parent is index or -1.
+    }
+
+    // Persist
+    save_tasks();
+}
+
 static void drawTasksRecursive(int idx, int depth = 0)
 {
-    // Safety check
+    // Safety
     if (idx < 0 || idx >= (int)tasks.size()) return;
 
     ImGui::PushID(idx);
 
-    // Render checkbox first (acts like the first column).
-    // Use a hidden visible label "##" to keep the UI clean; PushID makes it unique.
+    // Checkbox first (first-column behavior)
     bool done = tasks[idx].done;
     if (ImGui::Checkbox("##task_done", &done)) {
         tasks[idx].done = done;
         save_tasks();
-        // optional logging:
-        // appendDailyLog("TASK", std::string("Toggled task: ") + tasks[idx].name + (done ? " [done]" : " [not done]"));
+        append_daily_log("TASK", std::string("Toggled task: ") + tasks[idx].name + (done ? " [done]" : " [not done]"));
     }
 
-    // Place the tree node to the right of the checkbox.
+    // Simple delete "X" right after the checkbox
+    ImGui::SameLine();
+    {
+        ImGui::PushStyleColor(ImGuiCol_Button,        ImVec4(0.70f, 0.12f, 0.12f, 1.0f));
+        ImGui::PushStyleColor(ImGuiCol_ButtonHovered, ImVec4(0.90f, 0.18f, 0.18f, 1.0f));
+        ImGui::PushStyleColor(ImGuiCol_ButtonActive,  ImVec4(0.80f, 0.14f, 0.14f, 1.0f));
+
+        std::string xId = std::string("X###del_") + std::to_string(idx);
+        if (ImGui::SmallButton(xId.c_str())) {
+            removeTaskAndChildren(idx);
+            ImGui::PopStyleColor(3); // pop the three pushed colors
+            ImGui::PopID();          // balance the earlier PushID(idx)
+            return;
+        }
+
+        ImGui::PopStyleColor(3); // pop the three pushed colors for the non-click path
+    }
+
+    // Place tree node to the right of the checkbox+X
     ImGui::SameLine();
 
     // Indent the tree node according to depth so arrows/labels line up correctly.
-    // We indent the tree node only (not the checkbox) so the checkbox remains a
-    // fixed "first column" while the tree arrow/label sits in the second column.
     const float indentPerLevel = 18.0f;
     if (depth > 0) ImGui::Indent(depth * indentPerLevel);
 
@@ -536,22 +579,25 @@ static void drawTasksRecursive(int idx, int depth = 0)
     ImGuiTreeNodeFlags flags = ImGuiTreeNodeFlags_OpenOnArrow | ImGuiTreeNodeFlags_SpanAvailWidth;
     if (!hasChild) flags |= ImGuiTreeNodeFlags_Leaf;
 
-    // Draw the tree node label (arrow will appear atsave_tasks the indented position).
+    // Draw the tree node label
     bool opened = ImGui::TreeNodeEx((void*)(intptr_t)idx, flags, "%s", tasks[idx].name.c_str());
 
     // Unindent immediately after drawing the node so children are indented relative to the node.
     if (depth > 0) ImGui::Unindent(depth * indentPerLevel);
 
-    // If expanded, recurse into children (children will render their own checkbox + indented node)
+    // If expanded, recurse into children
     if (opened) {
         for (int i = 0; i < (int)tasks.size(); ++i) {
-            if (tasks[i].parent == idx) drawTasksRecursive(i, depth + 1);
+            if (tasks[i].parent == idx) {
+                drawTasksRecursive(i, depth + 1);
+            }
         }
         ImGui::TreePop();
     }
 
     ImGui::PopID();
 }
+
 // ----------------------- Main ---------------------------------------------
 int main(int, char**) {
     if (!glfwInit()) { fprintf(stderr,"glfwInit failed\n"); return 1; }
