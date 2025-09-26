@@ -55,6 +55,7 @@ static void save_daily_status_to_disk_and_log(const std::string &text);
 static void save_weekly_status_to_disk_and_log(const std::string &text);
 static void save_tasks();
 static void end_day_action();
+static void launch_analysis_script();
 
 // ----------------------- Cross-platform alert (best-effort) ----------------
 static void play_alert_sound() {
@@ -525,6 +526,40 @@ static void end_day_action() {
     request_quit.store(true);
 }
 
+// Launch external analysis Python script (non-blocking)
+static void launch_analysis_script() {
+    // Try data dir first, then current dir
+    std::string path = path_in_data("analyze_productivity.py");
+    std::ifstream f(path);
+    if (!f) {
+        path = std::string("analyze_productivity.py");
+        f.open(path);
+    }
+    if (!f) {
+        append_daily_log("ANALYSIS", std::string("Could not find analyze_productivity.py in data dir or current working dir."));
+        return;
+    }
+    f.close();
+
+    // Launch async so UI doesn't block
+    std::thread([path]() {
+#ifdef _WIN32
+        // Use start to detach the process on Windows
+        std::string cmd = std::string("start \"\" python \"") + path + "\"";
+        system(cmd.c_str());
+#else
+        // Use python3 if available, otherwise python, run with nohup in background
+        std::string cmd = std::string("nohup python3 \"") + path + "\" >/dev/null 2>&1 &";
+        if (system(cmd.c_str()) != 0) {
+            std::string cmd2 = std::string("nohup python \"") + path + "\" >/dev/null 2>&1 &";
+            system(cmd2.c_str());
+        }
+#endif
+    }).detach();
+
+    append_daily_log("ANALYSIS", std::string("Launched analyze_productivity script: ") + path);
+}
+
 // ----------------------- ImGui theme & helpers ----------------------------
 static void ApplyGrayTheme() {
     ImGuiStyle &style = ImGui::GetStyle();
@@ -926,18 +961,16 @@ int main(int, char**) {
             ImGui::PopStyleColor(3);
         }
         ImGui::SameLine();
-
-        // Export Hourly Logs (today) (blue)
+        // Analyze Productivity (AI)
         {
-            ImVec4 b = ImVec4(0.2f,0.45f,0.85f,1.0f);
-            ImVec4 bh = ImVec4(0.3f,0.6f,0.95f,1.0f);
-            ImVec4 ba = ImVec4(0.18f,0.4f,0.8f,1.0f);
+            ImVec4 b = ImVec4(0.12f,0.55f,0.40f,1.0f);
+            ImVec4 bh = ImVec4(0.18f,0.75f,0.55f,1.0f);
+            ImVec4 ba = ImVec4(0.10f,0.45f,0.32f,1.0f);
             ImGui::PushStyleColor(ImGuiCol_Button, b);
             ImGui::PushStyleColor(ImGuiCol_ButtonHovered, bh);
             ImGui::PushStyleColor(ImGuiCol_ButtonActive, ba);
-            if (ImGui::Button(makeButtonLabel("Export Hourly Logs (today)", "btn_export_hourly_today_top").c_str())) {
-                std::string p = export_hourly_logs_today();
-                if (!p.empty()) append_daily_log("EXPORT", std::string("Exported hourly logs (today) to ") + p);
+            if (ImGui::Button(makeButtonLabel("Analyze Productivity (AI)", "btn_analyze_ai").c_str())) {
+                launch_analysis_script();
             }
             ImGui::PopStyleColor(3);
         }
